@@ -31,7 +31,7 @@ A copy of this repository in your GitHub account, and on Cloudflare:
 | `DOWNLOADS` | R2 bucket | Files buyers pay for. **Keep it private**: never turn on its r2.dev URL or connect a domain to it. It must be a different bucket from `MEDIA` (the build refuses one shared bucket). |
 | `SESSION` | KV namespace | Admin sign-in sessions. |
 | `IMAGES` | Images | Resizes product photos. |
-| `RATE_LIMIT_AUTH`, `RATE_LIMIT_WRITES` | Rate limits | Per-visitor limits on sign-in and on cart and checkout writes. Cash on delivery is only offered with them. |
+| `RATE_LIMIT_AUTH`, `RATE_LIMIT_WRITES` | Rate limits | Per-visitor limits on sign-in and on cart and checkout writes. Cash on delivery is only offered with them. Their `namespace_id`s (`1001`, `1002`) are fixed in `wrangler.jsonc`, and Workers in one Cloudflare account that use the same ids **share the counters**: give a second store in the same account its own ids. |
 
 It also sets up **Workers Builds**: every push to your production branch runs `npm run build`
 and `npm run deploy`.
@@ -112,6 +112,14 @@ The first request sets up the database. If the site answers with an error:
 - "The migration lock has been held since …": the first setup was cut off, for example by
   the Workers Free CPU limit. Release the lock as the message's link explains (one statement
   in the D1 console of the dashboard), then reload.
+
+## Adding your own code
+
+You can add files under `src/`, but one is risky. **A `src/middleware.ts` of your own runs
+before Otta's.** Otta's middleware holds the store's cross-site request check and, until the
+store is claimed, the setup-link gate on the admin. If yours answers a request itself instead
+of calling `next()`, those checks never run for it. Always call `next()` for paths you do not
+own, and never answer `/_emdash/*` or the cart, checkout and account routes yourself.
 
 ## Local development
 
