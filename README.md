@@ -95,13 +95,20 @@ separate one when Wrangler has an update. **Merging it deploys the update.** If 
 fails, nothing is deployed and the store keeps running the version before; the build log says
 why.
 
-Dependabot does not touch EmDash, Astro or React: Otta declares the exact versions it works
-with, and a different one would install a second copy of EmDash (or not install at all). When
-an Otta release moves them, or needs any other change to this repository's own files (a new
-binding, say), its build fails with
-`@urumi.ai/otta-store <version> needs template contract <n> …`. Make the changes that section
-of [UPGRADING.md](https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md) lists, set
-`otta({ template: <n> })` in `astro.config.mjs`, and push.
+Two kinds of Otta release need more than merging:
+
+- **A release that moves EmDash, Astro or React.** Otta declares the exact versions it works
+  with, and Dependabot never touches them (a different one would install a second copy of
+  EmDash). So this kind of release does **not** arrive as a working pull request: Dependabot
+  holds back Otta's update, or its build stops at `npm install` with an `ERESOLVE` error,
+  before Otta's own checks run. You hear about it from Otta's release notes or announcement.
+  Then follow [UPGRADING.md](https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md):
+  change the pinned versions in `package.json` by hand, together with Otta's, and push.
+- **A release that needs a change to this repository's other files** (a new binding in
+  `wrangler.jsonc`, say). Its build fails with
+  `@urumi.ai/otta-store <version> needs template contract <n> …`. Make the changes that
+  section of UPGRADING.md lists, set `otta({ template: <n> })` in `astro.config.mjs`, and
+  push.
 
 ## If the first visit fails
 
