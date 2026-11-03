@@ -13,6 +13,11 @@
 	// Do NOT add `global_fetch_strictly_public`: the store uses D1 sessions, and
 	// that flag stalls them (Otta DEPLOYMENT.md §2.4).
 	"compatibility_flags": ["nodejs_compat"],
+	// No preview URLs (<version>-<name>.<subdomain>.workers.dev). A preview
+	// version uses this store's LIVE database, and its first request would run that
+	// version's database changes against your live data. README.md, step 1, also
+	// turns off non-production branch builds, which upload such versions.
+	"preview_urls": false,
 	"d1_databases": [
 		{
 			"binding": "DB",

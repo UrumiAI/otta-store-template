@@ -43,8 +43,10 @@ and `npm run deploy`.
 **Do this first.** Workers Builds also builds other branches (such as the weekly update
 branch) and uploads each as a preview version. A preview version uses your **live
 database**, and opening its URL runs that version's database changes against your live data
-before you have decided to update. In the Cloudflare dashboard: your Worker → **Settings** →
-**Builds** → **Branch control** → turn off builds for non-production branches.
+before you have decided to update. `wrangler.jsonc` already turns preview URLs off
+(`"preview_urls": false`); turning off the builds as well means no such version is uploaded at
+all. In the Cloudflare dashboard: your Worker → **Settings** → **Builds** → **Branch control**
+→ turn off builds for non-production branches.
 
 ### 2. Claim your store
 
