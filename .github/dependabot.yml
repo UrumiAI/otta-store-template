@@ -1,0 +1,22 @@
+# Store updates arrive as ONE pull request a week: Otta, EmDash, Astro and
+# Wrangler move together, because they are released and tested together.
+# Merging it deploys the new version (Workers Builds builds every push to the
+# production branch). If its build fails, nothing is deployed and the store
+# keeps running the version before; the build log says why.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      store:
+        patterns:
+          - "@urumi.ai/otta-*"
+          - "emdash"
+          - "@emdash-cms/*"
+          - "astro"
+          - "@astrojs/*"
+          - "react"
+          - "react-dom"
+          - "wrangler"
