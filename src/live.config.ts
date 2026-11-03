@@ -1,6 +1,5 @@
-// Astro reads live collections from the site's own src/live.config.ts, and
-// hands the real defineLiveCollection only to this file; the EmDash wiring is
-// the store's (sites/store/src/live-config.ts explains).
+// Astro reads live collections from this file, and hands the real
+// defineLiveCollection only to it; the EmDash wiring is the store's.
 import { defineLiveCollection } from "astro:content";
 import { ottaLiveCollections } from "@urumi.ai/otta-store/live-config";
 
