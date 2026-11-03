@@ -1,7 +1,15 @@
-# Store updates arrive as ONE pull request a week: Otta, EmDash, Astro and
-# Wrangler move together, because they are released and tested together.
-# Merging it deploys the new version (Workers Builds builds every push to the
-# production branch). If its build fails, nothing is deployed and the store
+# Dependabot updates only Otta's packages (as one pull request) and Wrangler.
+#
+# Everything else this store pins (emdash, @emdash-cms/cloudflare, astro,
+# @astrojs/*, react, react-dom) must match what @urumi.ai/otta-store declares
+# as its peer dependencies, exactly or to the minor. Those move only with an
+# Otta release that says so: its upgrade notes (UPGRADING.md, "Template
+# contract N") list the new pins, and its build fails until they are made.
+# Bumping one of them on its own would install a second copy of EmDash, or fail
+# to install at all.
+#
+# Merging an update deploys it (Workers Builds builds every push to the
+# production branch). If the build fails, nothing is deployed and the store
 # keeps running the version before; the build log says why.
 version: 2
 updates:
@@ -9,14 +17,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    allow:
+      - dependency-name: "@urumi.ai/*"
+      - dependency-name: "wrangler"
     groups:
-      store:
+      otta:
         patterns:
-          - "@urumi.ai/otta-*"
-          - "emdash"
-          - "@emdash-cms/*"
-          - "astro"
-          - "@astrojs/*"
-          - "react"
-          - "react-dom"
-          - "wrangler"
+          - "@urumi.ai/*"

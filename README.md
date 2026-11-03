@@ -88,13 +88,17 @@ The build refuses a sender without the binding.
 
 ## Updates
 
-Once a week Dependabot opens one pull request that updates Otta, EmDash, Astro and Wrangler
-together. **Merging it deploys the update.** If the build fails, nothing is deployed and the
-store keeps running the version before; the build log says why.
+Once a week Dependabot opens one pull request for Otta's packages (`@urumi.ai/*`), and a
+separate one when Wrangler has an update. **Merging it deploys the update.** If the build
+fails, nothing is deployed and the store keeps running the version before; the build log says
+why.
 
-Some updates also need a change to this repository's own files, for example a new binding.
-The build then fails with `@urumi.ai/otta-store <version> needs template contract <n> …`. Follow
-that section of [UPGRADING.md](https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md), set
+Dependabot does not touch EmDash, Astro or React: Otta declares the exact versions it works
+with, and a different one would install a second copy of EmDash (or not install at all). When
+an Otta release moves them, or needs any other change to this repository's own files (a new
+binding, say), its build fails with
+`@urumi.ai/otta-store <version> needs template contract <n> …`. Make the changes that section
+of [UPGRADING.md](https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md) lists, set
 `otta({ template: <n> })` in `astro.config.mjs`, and push.
 
 ## If the first visit fails
@@ -123,6 +127,6 @@ npm run dev
 | `wrangler.jsonc` | The Worker, its bindings, the cron and logging. |
 | `.dev.vars.example` | The secret the button asks for. |
 | `src/worker.ts`, `src/live.config.ts` | Wiring Cloudflare and Astro need to find in your repository. |
-| `.github/dependabot.yml` | The weekly update. |
+| `.github/dependabot.yml` | The weekly update of Otta's packages and Wrangler. |
 
 MIT licensed.
