@@ -1,7 +1,8 @@
 // Your store's Worker. The Deploy to Cloudflare button creates the database,
 // buckets and namespace below and writes their real IDs into your copy of this
-// file. `npm run build` reads it; `npm run deploy` (plain `wrangler deploy`)
-// then deploys what the build produced — never add `--config` there.
+// file. `npm run build` reads it; `npm run deploy` (scripts/deploy.mjs) then
+// applies the database migrations and runs plain `wrangler deploy` on what the
+// build produced — never add `--config` there.
 //
 // Secrets never go in this file. The store's one required secret,
 // EMDASH_ENCRYPTION_KEY, is a Worker secret (see .dev.vars.example). Two more

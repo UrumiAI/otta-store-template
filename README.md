@@ -12,13 +12,15 @@ update is a version bump, not a merge.
 
 ## Before you click
 
-- **Use Workers Paid until this is confirmed.** A new store's first start runs about 585
-  database migration statements, plus up to 54 for the store's default
-  collections and settings. Cloudflare documents a limit of
-  50 D1 queries per Worker invocation on Workers Free (1,000 on Paid). A new store has not been
-  shown to finish its first start on Workers Free, and a start that is cut off part-way may
-  leave a database that cannot be repaired (see "If the first visit fails"). Subscribe to
-  Workers Paid before you deploy.
+- **Workers Free: deploy with the button.** A new store's database needs 90 migrations (about
+  590 statements). The deploy applies them from the build, before the Worker goes live,
+  using a Cloudflare API token that Workers Builds provides; you set nothing up. Applying them
+  from outside the Worker has worked on a real Workers Free account. Started from inside the
+  Worker on that account, the same setup was cut off after 34 of 90 migrations and left the
+  store stuck, so never deploy a new store with plain `wrangler deploy`. The complete
+  button flow with this script has not yet been run end to end on Workers Free. The store's
+  default collections and settings (up to 54 more statements) are still set up on the first
+  request; that step finished on Workers Free once the migrations were applied.
 - **R2 needs a payment method on your Cloudflare account.** The free allowance still applies;
   the store's two buckets are created during deploy.
 - **Have an encryption key ready.** The button asks for `EMDASH_ENCRYPTION_KEY`. Make one with
@@ -47,7 +49,8 @@ A copy of this repository in your GitHub account, and on Cloudflare:
 | `RATE_LIMIT_AUTH`, `RATE_LIMIT_WRITES` | Rate limits | Per-visitor limits on sign-in and on cart and checkout writes. Cash on delivery is only offered with `RATE_LIMIT_WRITES`. Their `namespace_id`s (`1001`, `1002`) are set in `wrangler.jsonc`, and Workers in one Cloudflare account that use the same ids **share the counters**: give a second store in the same account its own ids. |
 
 It also sets up **Workers Builds**: every push to your production branch runs `npm run build`
-and `npm run deploy`.
+and `npm run deploy`. The deploy step (`scripts/deploy.mjs`) applies any new database migrations
+and then deploys the Worker, so a new store is never live on an unmigrated database.
 
 ## After deploying
 
@@ -132,26 +135,39 @@ Two kinds of Otta release need more than merging:
   section of UPGRADING.md lists, set `otta({ template: <n> })` in `astro.config.mjs`, and
   push.
 
-## If the first visit fails
+## If the deploy or the first visit fails
 
-The first request sets up the database. If that fails, the page usually says only "Database
+The deploy sets up the database before the Worker goes live, so a problem usually shows up in
+the build, not on the store. Open the failed build in your Worker's build history in the
+Cloudflare dashboard. Its log ends with `Deploy stopped.` and what to do. A failed build deploys
+nothing: a new store stays offline, and a running store keeps its current version.
+
+- "Another run took the database's migration lock": a build is running or one was cut off.
+  Wait until the lock is 15 minutes old, then retry the build; it takes over a lock that old.
+- "Applying the database migrations failed": retry the build. Completed migrations are kept and
+  the next run continues after them. If the same failure comes back, get help before retrying:
+  the migration that failed may be partly applied.
+- "has no real database_id": the id in `wrangler.jsonc` is still the template's placeholder.
+  Create the D1 database, put its id there and push.
+- A message naming `CLOUDFLARE_ACCOUNT_ID`: add a build variable with that name holding your
+  Cloudflare account id (Worker → **Settings** → **Build** → **Variables**), then retry.
+
+If the build succeeded but the first visit fails, the page usually says only "Database
 migrations are required. Apply the deployment migration manifest and retry." or "This site's
 database has not been migrated yet". The specific reason is in your Worker's **Logs**; look
 there for one of these:
 
 - "Database initialization is backing off after a recent migration failure": the store tries
-  again after about 30 seconds and skips migrations it has already recorded. That helps
-  after a brief fault. It does not repair a migration that stopped part-way, which can
-  fail again each time.
-- "The migration lock has been held since …": a start was cut off, for example by a platform
-  limit. The message says a migration may still be running and links to EmDash's steps for
-  releasing the lock. Those steps warn that the interrupted migration may be partly applied,
-  and releasing the lock does not undo that.
-- **If it keeps failing:** when the store has no data yet, delete its D1 database and create
-  a new one, put the new `database_id` in `wrangler.jsonc` in your repository, push so it
-  redeploys, and claim the store again. Do this on Workers Paid; on Workers Free the same
-  start can be cut off again. Once the store holds orders, do not delete anything: get
-  help first. We have not tested this recovery on a Cloudflare account.
+  again after about 30 seconds.
+- "The migration lock has been held since …": the Worker started migrating itself and was cut
+  off. Stores deployed before this template applied migrations in the build can be in this
+  state. Wait until the lock is 15 minutes old, then retry the build; it takes over the lock and
+  finishes the migrations. Migrations applied before the cut-off stay applied, and the one
+  that was running may be partly applied.
+- **If it keeps failing:** when the store has no data yet, delete its D1 database, create a new
+  one, put the new `database_id` in `wrangler.jsonc` in your repository and push; the build sets
+  it up again. Once the store holds orders, do not delete anything: get help first. We have not
+  tested this recovery on a Cloudflare account.
 
 ## Adding your own code
 
@@ -169,6 +185,9 @@ cp .dev.vars.example .dev.vars   # then fill in EMDASH_ENCRYPTION_KEY
 npm run dev
 ```
 
+Deploying from your own machine runs the same script: `npm run build`, then
+`CLOUDFLARE_API_TOKEN=<a token with D1 Edit> npm run deploy`.
+
 ## Files
 
 | File | |
@@ -177,6 +196,7 @@ npm run dev
 | `wrangler.jsonc` | The Worker, its bindings, the cron and logging. |
 | `.dev.vars.example` | The secret the button asks for. |
 | `src/worker.ts`, `src/live.config.ts` | Wiring Cloudflare and Astro need to find in your repository. |
+| `scripts/deploy.mjs` | The deploy: applies database migrations, then runs `wrangler deploy`. `npm test` checks it. |
 | `.github/dependabot.yml` | The weekly update of Otta's packages and Wrangler. |
 
 MIT licensed.
