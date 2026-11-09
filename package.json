@@ -23,7 +23,7 @@
 		"react-dom": "19.2.7"
 	},
 	"devDependencies": {
-		"wrangler": "4.110.0"
+		"wrangler": "4.159.0"
 	},
 	"engines": {
 		"node": ">=22.16"
