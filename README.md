@@ -122,8 +122,9 @@ The build refuses a sender without the binding.
 
 Once a week Dependabot opens one pull request for Otta's packages (`@urumi.ai/*`), and a
 separate one when Wrangler has an update. **Merging it deploys the update.** If the build
-fails, nothing is deployed and the store keeps running the version before; the build log says
-why.
+fails, no new Worker is deployed and the store keeps running the version before, though
+migrations the build already applied stay applied (see "If the deploy or the first visit
+fails"); the build log says why.
 
 Two kinds of Otta release need more than merging:
 
@@ -156,11 +157,19 @@ applying migrations, those stay applied: **deploying older code does not undo a 
   and shows a build variable to add: `OTTA_TAKE_OVER_LOCK=<lock id>`. Before adding it, check
   that no build or migration job is running for this store. Remove it afterwards.
 - "Applying the database migrations failed": read the state line above it (applied, pending,
-  lock). If nothing has been applied, retry the build. If any migrations are applied, **stop and
-  get help before you build again**: the failed migration may be partly applied, and running it
-  again can make that worse. The one exception EmDash documents is
-  `079_datetime_normalization` being the next pending migration, which is safe to run again; the
-  build says so when that is the case.
+  lock). The build says which of these applies:
+  - **"No migration completed"** after a clear error: retry the build. If it fails the same way
+    again, see "A new store with no orders" below.
+  - **Any migrations applied, or an ambiguous write** (even with none applied): **do not push,
+    merge an update pull request, or retry the build in the dashboard** until someone has
+    looked at it, because the failed migration may be partly applied and running it again can
+    make that worse. Nothing prevents a later push from running it again, so hold off on all
+    three. Get help. A brand-new store with no orders can use "A new store with no orders" below.
+  - **`079_datetime_normalization` is next**: EmDash documents this as safe to run again after
+    an ambiguous write, so the build says to retry; if it asks for manual review, correct the
+    listed values first.
+  - **"did not get the migration lock"**: another run held it, and this run applied nothing.
+    Wait as described above, then run the build again.
 - "permission denied" or a message about `D1 Edit`: the build's API token cannot change D1.
   Your Worker → **Settings** → **Build** shows which token the build uses. Edit that token
   (**Manage Account** → **Account API Tokens**, or **My Profile** → **API Tokens**), add
@@ -173,11 +182,20 @@ applying migrations, those stay applied: **deploying older code does not undo a 
   maintenance-window steps in
   [UPGRADING.md](https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md).
 
+### A new store with no orders
+
+If a new store has no data worth keeping, the simplest recovery from a failed setup is to start
+the database again: delete its D1 database, create a new one, put the new `database_id` in
+`wrangler.jsonc` in your repository and push; the build sets it up again. Once the store holds
+orders, do not delete anything: get help first. We have not tested this recovery on a Cloudflare
+account.
+
 ### Restoring the database or the code
 
 On a store with applied migrations, the build log records a D1 Time Travel bookmark and commit
-before changing anything. To put the database back (Time Travel keeps 7 days on Workers Free,
-30 on Paid):
+before changing anything. **Use the bookmark from the first failed build:** a bookmark logged by
+a later build was taken after the partial changes. To put the database back (Time Travel keeps
+7 days on Workers Free, 30 on Paid):
 
 ```bash
 npx wrangler d1 time-travel restore <database name> --bookmark=<bookmark from the log>
@@ -206,10 +224,8 @@ is in your Worker's **Logs**; look there for one of these:
   Then confirm your Worker → **Settings** → **Build** → **Deploy command** is `npm run deploy`,
   and push. The build then follows the lock steps above; the migration that was running when the
   Worker was cut off may be partly applied.
-- **If it keeps failing:** when the store has no data yet, delete its D1 database, create a new
-  one, put the new `database_id` in `wrangler.jsonc` in your repository and push; the build sets
-  it up again. Once the store holds orders, do not delete anything: get help first. We have not
-  tested this recovery on a Cloudflare account.
+- **If it keeps failing:** see "A new store with no orders" above. Once the store holds orders,
+  get help first.
 
 ## Adding your own code
 
@@ -227,10 +243,13 @@ cp .dev.vars.example .dev.vars   # then fill in EMDASH_ENCRYPTION_KEY
 npm run dev
 ```
 
-Deploying from your own machine runs the same script, which needs an API token with D1 Edit
-and your account id (the build gets both from Cloudflare instead): `npm run build`, then
-`CLOUDFLARE_API_TOKEN=<token> CLOUDFLARE_ACCOUNT_ID=<id> npm run deploy`. Add
-`-- --migrate-only` to apply migrations without deploying.
+Deploying from your own machine runs the same script, and needs an API token with D1 Edit in
+`CLOUDFLARE_API_TOKEN` (`npm run build`, then `CLOUDFLARE_API_TOKEN=<token> npm run deploy`).
+Add `-- --migrate-only` to apply migrations without deploying. The script takes the account id
+from `account_id` in `wrangler.jsonc`, then `CLOUDFLARE_ACCOUNT_ID`, then the only account the
+token can see, or, if it can see several, the one that holds this database. Workers Builds has
+not been confirmed to provide the account id on a real build yet; the first lines of the build
+log say whether `CLOUDFLARE_ACCOUNT_ID` was present.
 
 ## Files
 

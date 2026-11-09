@@ -44,6 +44,10 @@ const LOCK_RECHECK_MS = 60 * 1000;
 const MAINTENANCE_WINDOW = new Set(["095_plugin_storage_unique_scope"]);
 // EmDash documents re-running this migration as safe after an ambiguous write.
 const RESUMABLE_MIGRATION = "079_datetime_normalization";
+// EmDash's messages when a run never obtained the lock.
+const LOCK_NOT_OBTAINED =
+	/migration lock has been held since|Timed out waiting for another instance's migrations|migration lock has a different id|migration lock is not held/i;
+const NO_DATA_RECOVERY = "A new store with no orders";
 const UPGRADING = "https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md";
 const HELP = "https://github.com/UrumiAI/otta.sh/issues";
 const NOTHING_CHANGED =
@@ -369,9 +373,10 @@ async function migrate(accountId, databaseId, databaseName) {
 		const args = [...target, "--json", "--expected-target-fingerprint", fingerprint];
 		if (takeOver) args.push("--take-over-lock", takeOver);
 		const applied = await emdashReport(args);
-		if (applied.code !== 0) await failApply(target, applied);
+		if (applied.code !== 0 && pending.length > 0) await failApply(target, applied);
 		migrationsRan = pending.length > 0;
-		log(pending.length > 0 ? `Applied ${applied.report?.executed?.length ?? pending.length} migrations.` : "Lock released.");
+		if (applied.code !== 0) log("Warning: could not release the stale lock. Nothing is pending, so it does not affect this deploy.");
+		else log(pending.length > 0 ? `Applied ${applied.report?.executed?.length ?? pending.length} migrations.` : "Lock released.");
 	}
 
 	const check = await emdashReport([...target, "--check", "--json"]);
@@ -412,6 +417,16 @@ async function failApply(target, applied) {
 	const ambiguous = /ambiguous/i.test(applied.stderr);
 	const header = "Applying the database migrations failed (see the message above).";
 
+	// EmDash takes the lock before its first migration, so a run that lost the
+	// lock applied nothing, and there is nothing partly applied to worry about.
+	if (LOCK_NOT_OBTAINED.test(applied.stderr)) {
+		stop(
+			"This run did not get the migration lock, so it applied nothing: another run holds it or got there first.",
+			"Wait until the lock is 25 minutes old, then run the build again; it re-checks the lock and says what to do next.",
+			NOTHING_CHANGED,
+		);
+	}
+
 	if (state && next === RESUMABLE_MIGRATION && ambiguous) {
 		stop(header, `The next pending migration is ${RESUMABLE_MIGRATION}, which EmDash documents as safe to run again after an ambiguous write: it continues after the last rows it wrote.`, RETRY, NOT_UNDONE);
 	}
@@ -419,14 +434,20 @@ async function failApply(target, applied) {
 		stop(header, `${RESUMABLE_MIGRATION} needs the values listed above corrected: give each an explicit UTC offset, then run the build again.`, NOT_UNDONE);
 	}
 	if (state && state.knownApplied.length === 0 && !ambiguous) {
-		stop(header, isPermissionError(applied.stderr) ? D1_EDIT_STEPS : RETRY, NOTHING_CHANGED);
+		stop(
+			header,
+			"No migration completed, though the first one may be partly applied. No Worker was deployed.",
+			isPermissionError(applied.stderr) ? D1_EDIT_STEPS : RETRY,
+			`If it fails the same way again, this store has no data yet: see "${NO_DATA_RECOVERY}" in README.md.`,
+		);
 	}
 	stop(
 		header,
-		"Do not build again or push until someone has looked at this: a run cut off part-way can leave the first pending migration partly applied, and running it again can make that worse.",
+		"Do not push, merge an update pull request, or retry the build in the dashboard until someone has looked at this: a run cut off part-way can leave the first pending migration partly applied, and running it again can make that worse. Nothing prevents a later push from running it again, so hold off on all of them.",
+		"If the database has to be restored, use the bookmark from the first failed build: bookmarks logged by later builds were taken after partial changes.",
 		...(isPermissionError(applied.stderr) ? [D1_EDIT_STEPS.replace(" Then retry the build.", "")] : []),
 		`Get help (${HELP}) and include this log.`,
-		"If this store has no data yet, README.md describes the simpler recovery.",
+		`If this store has no orders yet, see "${NO_DATA_RECOVERY}" in README.md instead.`,
 		NOT_UNDONE,
 	);
 }

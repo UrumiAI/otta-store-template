@@ -344,6 +344,14 @@ describe("migration lock", () => {
 		assert.equal(flagValue(run.calls[1], "--take-over-lock"), lock.id);
 	});
 
+	test("a failed release with nothing pending warns and continues", () => {
+		const run = runDeploy({ state: { lock: ago(60), pending: [], applied: PENDING, applyExit: 1 } });
+		assert.equal(run.code, 0, run.output);
+		assert.deepEqual(run.steps, ["status", "apply", "check", "deploy"]);
+		assert.match(run.output, /could not release/i);
+		assert.doesNotMatch(run.output, /Get help|Do not/);
+	});
+
 	test("fresh lock with nothing pending does not block the deploy", () => {
 		const run = runDeploy({ state: { lock: ago(1), pending: [], applied: PENDING } });
 		assert.equal(run.code, 0, run.output);
@@ -421,11 +429,14 @@ describe("migration lock", () => {
 describe("a failed apply", () => {
 	const applied = { applied: ["001_initial"], pending: ["002_media_status"] };
 
-	test("nothing applied: says so and allows a retry", () => {
+	test("nothing completed: no 'changed nothing', allows a retry, points to the recovery", () => {
 		const run = runDeploy({ state: { applyExit: 1 } });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status", "apply", "status"]);
 		assert.match(run.output, /0 applied, 3 pending/);
+		assert.match(run.output, /No migration completed/);
+		assert.doesNotMatch(run.output, /changed nothing/);
+		assert.match(run.output, /A new store with no orders/);
 		assert.match(run.output, /Retry/);
 		assert.doesNotMatch(run.output, /Get help/);
 	});
@@ -435,7 +446,7 @@ describe("a failed apply", () => {
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status", "apply", "status"]);
 		assert.match(run.output, /Get help/);
-		assert.doesNotMatch(run.output, /[Rr]etry the build/);
+		assert.doesNotMatch(run.output, /Retry the build from/);
 		assert.match(run.output, /1 applied, 1 pending/);
 	});
 
@@ -447,7 +458,7 @@ describe("a failed apply", () => {
 			},
 		});
 		assert.match(run.output, /Get help/);
-		assert.doesNotMatch(run.output, /[Rr]etry the build/);
+		assert.doesNotMatch(run.output, /Retry the build from/);
 	});
 
 	test("ambiguous write with nothing applied: stop and get help", () => {
@@ -455,8 +466,33 @@ describe("a failed apply", () => {
 			state: { applyExit: 1, applyMessage: "The D1 write outcome is ambiguous because its response was not received safely." },
 		});
 		assert.match(run.output, /Get help/);
-		assert.doesNotMatch(run.output, /[Rr]etry the build/);
+		assert.doesNotMatch(run.output, /Retry the build from/);
 	});
+
+	test("the stop names what not to do, and why a restore needs the first bookmark", () => {
+		const run = runDeploy({ state: { ...applied, applyExit: 1 } });
+		assert.match(run.output, /push, merge an update pull request, or retry the build in the dashboard/);
+		assert.match(run.output, /Nothing prevents a later push/);
+		assert.match(run.output, /first failed build/);
+		assert.match(run.output, /A new store with no orders/);
+	});
+
+	for (const [name, message] of [
+		["lock held by another run", "The migration lock has been held since 2026-09-01T12:00:00.000Z (lock 1788264000000). A migration may still be running"],
+		["timed out waiting for another run", "Timed out waiting for another instance's migrations: the migration lock was still held after 10000ms."],
+		["take-over lost", "The migration lock has a different id now. Check the status again."],
+		["take-over lock gone", "The migration lock is not held."],
+	]) {
+		test(`this run never got the lock (${name}): a wait message, not a stop`, () => {
+			const run = runDeploy({ state: { ...applied, applyExit: 1, applyMessage: message } });
+			assert.notEqual(run.code, 0);
+			assert.deepEqual(run.steps, ["status", "apply", "status"]);
+			assert.match(run.output, /did not get the migration lock/);
+			assert.match(run.output, /25 minutes/);
+			assert.doesNotMatch(run.output, /partly applied/);
+			assert.doesNotMatch(run.output, /Get help/);
+		});
+	}
 
 	test("ambiguous write with 079 next: the documented exception, run again", () => {
 		const run = runDeploy({
