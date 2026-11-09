@@ -13,14 +13,19 @@ update is a version bump, not a merge.
 ## Before you click
 
 - **Workers Free: deploy with the button.** A new store's database needs 90 migrations (about
-  590 statements). The deploy applies them from the build, before the Worker goes live,
-  using a Cloudflare API token that Workers Builds provides; you set nothing up. Applying them
-  from outside the Worker has worked on a real Workers Free account. Started from inside the
-  Worker on that account, the same setup was cut off after 34 of 90 migrations and left the
-  store stuck, so never deploy a new store with plain `wrangler deploy`. The complete
-  button flow with this script has not yet been run end to end on Workers Free. The store's
-  default collections and settings (up to 54 more statements) are still set up on the first
-  request; that step finished on Workers Free once the migrations were applied.
+  590 statements). The deploy applies them from the build, before the Worker goes live, using
+  the Cloudflare API token Workers Builds gives the build. In one real build that token could
+  change D1 without any setup; if yours cannot, the build stops and says how to fix it (see
+  "If the deploy or the first visit fails").
+  What has been shown, and what has not: on a real Workers Free account a first start inside
+  the Worker was cut off after 34 of 90 migrations and left that store stuck; the remaining 56
+  were then applied by hand with `emdash migrate` and the store started. Separately, this
+  template's script applied all 90 to a scratch D1 database from a local build, on a free
+  account. The complete button flow with this script has not yet been run end to end on Workers
+  Free. Do not deploy a new store with plain `wrangler deploy`: the Worker would set up the
+  database itself and be cut off. The store's default collections and settings (up to 54
+  more statements) are still set up on the first request; that step finished on Workers Free in
+  the manual recovery above.
 - **R2 needs a payment method on your Cloudflare account.** The free allowance still applies;
   the store's two buckets are created during deploy.
 - **Have an encryption key ready.** The button asks for `EMDASH_ENCRYPTION_KEY`. Make one with
@@ -139,31 +144,68 @@ Two kinds of Otta release need more than merging:
 
 The deploy sets up the database before the Worker goes live, so a problem usually shows up in
 the build, not on the store. Open the failed build in your Worker's build history in the
-Cloudflare dashboard. Its log ends with `Deploy stopped.` and what to do. A failed build deploys
-nothing: a new store stays offline, and a running store keeps its current version.
+Cloudflare dashboard. Its log ends with `Deploy stopped.` and what to do.
+
+What a failed build has done depends on where it stopped. No new Worker is deployed, so a new
+store stays offline and a running store keeps its current version. But if it stopped after
+applying migrations, those stay applied: **deploying older code does not undo a migration**.
 
 - "Another run took the database's migration lock": a build is running or one was cut off.
-  Wait until the lock is 15 minutes old, then retry the build; it takes over a lock that old.
-- "Applying the database migrations failed": retry the build. Completed migrations are kept and
-  the next run continues after them. If the same failure comes back, get help before retrying:
-  the migration that failed may be partly applied.
+  Wait until the lock is 25 minutes old, then run the build again. A database with nothing
+  applied yet is taken over automatically. On a store with applied migrations the build stops
+  and shows a build variable to add: `OTTA_TAKE_OVER_LOCK=<lock id>`. Before adding it, check
+  that no build or migration job is running for this store. Remove it afterwards.
+- "Applying the database migrations failed": read the state line above it (applied, pending,
+  lock). If nothing has been applied, retry the build. If any migrations are applied, **stop and
+  get help before you build again**: the failed migration may be partly applied, and running it
+  again can make that worse. The one exception EmDash documents is
+  `079_datetime_normalization` being the next pending migration, which is safe to run again; the
+  build says so when that is the case.
+- "permission denied" or a message about `D1 Edit`: the build's API token cannot change D1.
+  Your Worker → **Settings** → **Build** shows which token the build uses. Edit that token
+  (**Manage Account** → **Account API Tokens**, or **My Profile** → **API Tokens**), add
+  **Account** → **D1** → **Edit**, save, and retry the build.
 - "has no real database_id": the id in `wrangler.jsonc` is still the template's placeholder.
   Create the D1 database, put its id there and push.
 - A message naming `CLOUDFLARE_ACCOUNT_ID`: add a build variable with that name holding your
   Cloudflare account id (Worker → **Settings** → **Build** → **Variables**), then retry.
+- A pending migration that "must not run while older code serves traffic": follow the
+  maintenance-window steps in
+  [UPGRADING.md](https://github.com/UrumiAI/otta.sh/blob/main/UPGRADING.md).
 
-If the build succeeded but the first visit fails, the page usually says only "Database
-migrations are required. Apply the deployment migration manifest and retry." or "This site's
-database has not been migrated yet". The specific reason is in your Worker's **Logs**; look
-there for one of these:
+### Restoring the database or the code
+
+On a store with applied migrations, the build log records a D1 Time Travel bookmark and commit
+before changing anything. To put the database back (Time Travel keeps 7 days on Workers Free,
+30 on Paid):
+
+```bash
+npx wrangler d1 time-travel restore <database name> --bookmark=<bookmark from the log>
+```
+
+A restore removes everything written since that point. **Then check Stripe for payments made
+since the bookmark:** a payment for an order the restore removed is acknowledged as
+`ORDER_NOT_FOUND` and is not refunded automatically, so refund it from the Stripe dashboard.
+
+To put the code back, use your Worker → **Deployments** in the dashboard and roll back. That
+restores the previous Worker only. It does not reverse a migration; the database stays as it is
+unless you restore it too.
+
+### If the build succeeded but the first visit fails
+
+The page usually says only "Database migrations are required. Apply the deployment migration
+manifest and retry." or "This site's database has not been migrated yet". The specific reason
+is in your Worker's **Logs**; look there for one of these:
 
 - "Database initialization is backing off after a recent migration failure": the store tries
   again after about 30 seconds.
 - "The migration lock has been held since …": the Worker started migrating itself and was cut
-  off. Stores deployed before this template applied migrations in the build can be in this
-  state. Wait until the lock is 15 minutes old, then retry the build; it takes over the lock and
-  finishes the migrations. Migrations applied before the cut-off stay applied, and the one
-  that was running may be partly applied.
+  off. Stores made before this template applied migrations in the build are the usual case.
+  Such a store has no `scripts/deploy.mjs`, so first copy that file from this repository
+  and the `"deploy": "node scripts/deploy.mjs"` line from its `package.json` into your repository.
+  Then confirm your Worker → **Settings** → **Build** → **Deploy command** is `npm run deploy`,
+  and push. The build then follows the lock steps above; the migration that was running when the
+  Worker was cut off may be partly applied.
 - **If it keeps failing:** when the store has no data yet, delete its D1 database, create a new
   one, put the new `database_id` in `wrangler.jsonc` in your repository and push; the build sets
   it up again. Once the store holds orders, do not delete anything: get help first. We have not
@@ -185,8 +227,10 @@ cp .dev.vars.example .dev.vars   # then fill in EMDASH_ENCRYPTION_KEY
 npm run dev
 ```
 
-Deploying from your own machine runs the same script: `npm run build`, then
-`CLOUDFLARE_API_TOKEN=<a token with D1 Edit> npm run deploy`.
+Deploying from your own machine runs the same script, which needs an API token with D1 Edit
+and your account id (the build gets both from Cloudflare instead): `npm run build`, then
+`CLOUDFLARE_API_TOKEN=<token> CLOUDFLARE_ACCOUNT_ID=<id> npm run deploy`. Add
+`-- --migrate-only` to apply migrations without deploying.
 
 ## Files
 
@@ -196,7 +240,8 @@ Deploying from your own machine runs the same script: `npm run build`, then
 | `wrangler.jsonc` | The Worker, its bindings, the cron and logging. |
 | `.dev.vars.example` | The secret the button asks for. |
 | `src/worker.ts`, `src/live.config.ts` | Wiring Cloudflare and Astro need to find in your repository. |
-| `scripts/deploy.mjs` | The deploy: applies database migrations, then runs `wrangler deploy`. `npm test` checks it. |
+| `scripts/deploy.mjs` | `npm run deploy`: applies database migrations, then runs `wrangler deploy`. |
+| `scripts/deploy.test.mjs` | `npm test`: tests that script against fake `emdash` and `wrangler` tools. It does not touch Cloudflare. |
 | `.github/dependabot.yml` | The weekly update of Otta's packages and Wrangler. |
 
 MIT licensed.

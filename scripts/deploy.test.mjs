@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), "otta-deploy-test-"));
@@ -27,6 +27,7 @@ const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const FINGERPRINT = "ab".repeat(32);
 const REAL_DB_ID = "12345678-1234-4234-8234-123456789012";
 const PLACEHOLDER_DB_ID = "00000000-0000-0000-0000-000000000000";
+const COMMIT = "deadbeefcafe0123456789";
 const PENDING = ["001_initial", "002_media_status", "091_redirect_artifacts"];
 
 // One fake program, installed as both `emdash` and `wrangler`. It appends each
@@ -43,6 +44,9 @@ const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
 const leak = () => {
 	if (!state.leak) return;
 	console.error("leak on stderr " + process.env.CLOUDFLARE_API_TOKEN + " " + process.env.EMDASH_ENCRYPTION_KEY);
+};
+const leakPartialStderr = () => {
+	if (state.leakFinalLine) process.stderr.write("final line no newline " + process.env.CLOUDFLARE_API_TOKEN);
 };
 const report = () => ({
 	target: { kind: "d1", label: "acct/db/id", fingerprint: state.fingerprint },
@@ -68,7 +72,10 @@ if (tool === "wrangler") {
 }
 leak();
 if (args.includes("--status")) {
-	if (state.statusExit) { console.error("status failed"); process.exit(state.statusExit); }
+	state.statusCount = (state.statusCount ?? 0) + 1;
+	if (state.statusCount >= 2 && state.secondRead) Object.assign(state, state.secondRead);
+	save();
+	if (state.statusExit) { console.error(state.statusMessage ?? "status failed"); process.exit(state.statusExit); }
 	console.log(JSON.stringify(report()));
 	process.exit(0);
 }
@@ -84,7 +91,14 @@ if (!args.includes("--expected-target-fingerprint") || fp !== state.fingerprint)
 	console.error("Noninteractive apply requires --expected-target-fingerprint");
 	process.exit(4);
 }
-if (state.applyExit) { console.error("apply failed part-way"); process.exit(state.applyExit); }
+if (state.applyExit) {
+	console.error(state.applyMessage ?? "apply failed part-way");
+	if (state.leakStdout) process.stdout.write("leak on stdout " + process.env.CLOUDFLARE_API_TOKEN + "\\n");
+	leakPartialStderr();
+	if (state.afterApplyFail) Object.assign(state, state.afterApplyFail);
+	save();
+	process.exit(state.applyExit);
+}
 const executed = state.pending;
 state.applied = [...state.applied, ...state.pending];
 state.pending = [];
@@ -92,6 +106,32 @@ state.lock = null;
 save();
 console.log(JSON.stringify({ ...report(), executed }));
 process.exit(0);
+`;
+
+// Loaded into the script with --import. Replaces fetch (no network in tests) and
+// makes the 60-second lock re-read instant while recording that it was asked for.
+const PRELOAD = `import fs from "node:fs";
+const log = (entry) => fs.appendFileSync(process.env.FAKE_CALLS, JSON.stringify(entry) + "\\n");
+const state = () => JSON.parse(fs.readFileSync(process.env.FAKE_STATE, "utf8"));
+globalThis.fetch = async (url) => {
+	const s = state();
+	const path = String(url).replace("https://api.cloudflare.com/client/v4", "");
+	log(["fetch", path]);
+	if (path.endsWith("/time_travel/bookmark")) {
+		if (s.bookmarkFail) return new Response("{}", { status: 500 });
+		return Response.json({ success: true, result: { bookmark: s.bookmark ?? "bookmark-before-migrating" } });
+	}
+	const match = path.match(/^\\/accounts\\/([^/]+)\\/d1\\/database\\/[^/]+$/);
+	return new Response("{}", { status: match && (s.d1Access ?? []).includes(match[1]) ? 200 : 404 });
+};
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...rest) => {
+	if (ms === 60000) {
+		log(["sleep", ms]);
+		return realSetTimeout(fn, 0, ...rest);
+	}
+	return realSetTimeout(fn, ms, ...rest);
+};
 `;
 
 const WRANGLER_JSONC = (dbId, extra = "") => `// a comment with "database_id": "11111111-1111-1111-1111-111111111111"
@@ -131,6 +171,7 @@ function runDeploy({
 	wranglerExtra = "",
 	manifest = true,
 	omit = [],
+	wranglerFile,
 } = {}) {
 	const project = join(scratch, `p${++counter}`);
 	const bin = join(project, ".fakebin");
@@ -138,7 +179,7 @@ function runDeploy({
 	mkdirSync(bin);
 	copyFileSync(join(here, "deploy.mjs"), join(project, "scripts", "deploy.mjs"));
 	writeFileSync(join(project, "package.json"), '{"name":"t"}');
-	writeFileSync(join(project, "wrangler.jsonc"), WRANGLER_JSONC(databaseId, wranglerExtra));
+	writeFileSync(join(project, "wrangler.jsonc"), wranglerFile ?? WRANGLER_JSONC(databaseId, wranglerExtra));
 	if (manifest) {
 		mkdirSync(join(project, ".emdash"));
 		writeFileSync(
@@ -151,6 +192,7 @@ function runDeploy({
 		writeFileSync(file, FAKE);
 		chmodSync(file, 0o755);
 	}
+	writeFileSync(join(bin, "preload.mjs"), PRELOAD);
 	const statePath = join(project, "fake-state.json");
 	const callsPath = join(project, "fake-calls.jsonl");
 	writeFileSync(statePath, JSON.stringify(defaultState(stateOverrides)));
@@ -162,6 +204,8 @@ function runDeploy({
 		PATH: `${bin}:${dirname(process.execPath)}`,
 		FAKE_STATE: statePath,
 		FAKE_CALLS: callsPath,
+		NODE_OPTIONS: `--import=${pathToFileURL(join(bin, "preload.mjs")).href}`,
+		WORKERS_CI_COMMIT_SHA: COMMIT,
 		CLOUDFLARE_API_TOKEN: TOKEN,
 		CLOUDFLARE_ACCOUNT_ID: ACCOUNT,
 		EMDASH_ENCRYPTION_KEY: ENCRYPTION_KEY,
@@ -174,15 +218,18 @@ function runDeploy({
 		env: childEnv,
 		encoding: "utf8",
 	});
-	const calls = readFileSync(callsPath, "utf8")
+	const all = readFileSync(callsPath, "utf8")
 		.split("\n")
 		.filter(Boolean)
 		.map((line) => JSON.parse(line));
+	const calls = all.filter(([tool]) => tool === "emdash" || tool === "wrangler");
 	return {
 		code: result.status,
 		output: `${result.stdout}${result.stderr}`,
 		calls,
 		steps: calls.map(label),
+		sleeps: all.filter(([tool]) => tool === "sleep").length,
+		fetches: all.filter(([tool]) => tool === "fetch").map(([, path]) => path),
 		state: JSON.parse(readFileSync(statePath, "utf8")),
 		project,
 	};
@@ -210,7 +257,8 @@ describe("first deploy and later pushes", () => {
 		const apply = run.calls[1];
 		assert.equal(flagValue(apply, "--expected-target-fingerprint"), FINGERPRINT);
 		assert.ok(!apply.includes("--take-over-lock"));
-		assert.equal(flagValue(apply, "--wrangler-config"), "wrangler.jsonc");
+		assert.ok(!apply.includes("--wrangler-config"));
+		assert.equal(flagValue(apply, "--d1"), REAL_DB_ID);
 		assert.equal(flagValue(apply, "--account-id"), ACCOUNT);
 		assert.deepEqual(run.state.pending, []);
 	});
@@ -247,27 +295,38 @@ describe("first deploy and later pushes", () => {
 });
 
 describe("migration lock", () => {
-	test("stale lock (older than 15 minutes) is taken over", () => {
-		const lock = ago(20);
+	const existing = { applied: ["001_initial"], pending: ["002_media_status"] };
+
+	test("stale lock on an empty database is taken over after a second read", () => {
+		const lock = ago(26);
 		const run = runDeploy({ state: { lock } });
 		assert.equal(run.code, 0, run.output);
-		assert.deepEqual(run.steps, ["status", "apply", "check", "deploy"]);
-		assert.equal(flagValue(run.calls[1], "--take-over-lock"), lock.id);
-		assert.equal(flagValue(run.calls[1], "--expected-target-fingerprint"), FINGERPRINT);
+		assert.deepEqual(run.steps, ["status", "status", "apply", "check", "deploy"]);
+		assert.equal(run.sleeps, 1);
+		assert.equal(flagValue(run.calls[2], "--take-over-lock"), lock.id);
+		assert.equal(flagValue(run.calls[2], "--expected-target-fingerprint"), FINGERPRINT);
+	});
+
+	test("lock just under 25 minutes is refused", () => {
+		const run = runDeploy({ state: { lock: ago(24.5) } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status"]);
+		assert.match(run.output, /25 minutes/);
+	});
+
+	test("lock just over 25 minutes is taken over", () => {
+		const run = runDeploy({ state: { lock: ago(25.5) } });
+		assert.equal(run.code, 0, run.output);
+		assert.ok(run.steps.includes("apply"));
+		assert.ok(run.calls.some((call) => call.includes("--take-over-lock")));
 	});
 
 	test("fresh lock with pending migrations is refused, nothing applied or deployed", () => {
 		const run = runDeploy({ state: { lock: ago(3) } });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status"]);
-		assert.match(run.output, /retry/i);
-		assert.match(run.output, /15 minutes/);
-	});
-
-	test("lock just under the threshold is still refused", () => {
-		const run = runDeploy({ state: { lock: ago(14.5) } });
-		assert.notEqual(run.code, 0);
-		assert.deepEqual(run.steps, ["status"]);
+		assert.match(run.output, /25 minutes/);
+		assert.match(run.output, /changed nothing/);
 	});
 
 	test("a lock with an unreadable time is treated as fresh", () => {
@@ -276,11 +335,12 @@ describe("migration lock", () => {
 		assert.deepEqual(run.steps, ["status"]);
 	});
 
-	test("stale lock with nothing pending is released, then deploys", () => {
+	test("stale lock with nothing pending is released without a second read", () => {
 		const lock = ago(60);
 		const run = runDeploy({ state: { lock, pending: [], applied: PENDING } });
 		assert.equal(run.code, 0, run.output);
 		assert.deepEqual(run.steps, ["status", "apply", "check", "deploy"]);
+		assert.equal(run.sleeps, 0);
 		assert.equal(flagValue(run.calls[1], "--take-over-lock"), lock.id);
 	});
 
@@ -289,40 +349,272 @@ describe("migration lock", () => {
 		assert.equal(run.code, 0, run.output);
 		assert.deepEqual(run.steps, ["status", "check", "deploy"]);
 	});
+
+	test("second read refused when the applied set changed", () => {
+		const run = runDeploy({
+			state: { lock: ago(40), secondRead: { applied: ["001_initial"], pending: ["002_media_status"] } },
+		});
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "status"]);
+		assert.equal(run.sleeps, 1);
+		assert.match(run.output, /changed/);
+	});
+
+	test("second read refused when the lock id changed", () => {
+		const run = runDeploy({ state: { lock: ago(40), secondRead: { lock: ago(1) } } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "status"]);
+	});
+
+	test("second read refused when the lock disappeared", () => {
+		const run = runDeploy({ state: { lock: ago(40), secondRead: { lock: null } } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "status"]);
+	});
+
+	test("stale lock on an existing database is not taken over without the opt-in", () => {
+		const lock = ago(40);
+		const run = runDeploy({ state: { ...existing, lock } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status"]);
+		assert.equal(run.sleeps, 0);
+		assert.ok(!run.calls.some((call) => call.includes("--take-over-lock")));
+		assert.match(run.output, new RegExp(`OTTA_TAKE_OVER_LOCK=${lock.id}`));
+		assert.match(run.output, /running/i);
+	});
+
+	test("opt-in with a different id is refused and shows the real one", () => {
+		const lock = ago(40);
+		const run = runDeploy({
+			state: { ...existing, lock },
+			env: { OTTA_TAKE_OVER_LOCK: "123456" },
+		});
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status"]);
+		assert.match(run.output, /does not match/);
+		assert.match(run.output, new RegExp(`OTTA_TAKE_OVER_LOCK=${lock.id}`));
+	});
+
+	test("opt-in with the exact id takes over after a second read", () => {
+		const lock = ago(40);
+		const run = runDeploy({
+			state: { ...existing, lock },
+			env: { OTTA_TAKE_OVER_LOCK: lock.id },
+		});
+		assert.equal(run.code, 0, run.output);
+		assert.deepEqual(run.steps, ["status", "status", "apply", "check", "deploy"]);
+		assert.equal(run.sleeps, 1);
+		assert.equal(flagValue(run.calls[2], "--take-over-lock"), lock.id);
+	});
+
+	test("opt-in still refuses when the second read shows the database changing", () => {
+		const lock = ago(40);
+		const run = runDeploy({
+			state: { ...existing, lock, secondRead: { applied: ["001_initial", "002_media_status"], pending: [] } },
+			env: { OTTA_TAKE_OVER_LOCK: lock.id },
+		});
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "status"]);
+	});
+});
+
+describe("a failed apply", () => {
+	const applied = { applied: ["001_initial"], pending: ["002_media_status"] };
+
+	test("nothing applied: says so and allows a retry", () => {
+		const run = runDeploy({ state: { applyExit: 1 } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "apply", "status"]);
+		assert.match(run.output, /0 applied, 3 pending/);
+		assert.match(run.output, /Retry/);
+		assert.doesNotMatch(run.output, /Get help/);
+	});
+
+	test("applied migrations on an existing store: stop and get help, no retry", () => {
+		const run = runDeploy({ state: { ...applied, applyExit: 1 } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "apply", "status"]);
+		assert.match(run.output, /Get help/);
+		assert.doesNotMatch(run.output, /[Rr]etry the build/);
+		assert.match(run.output, /1 applied, 1 pending/);
+	});
+
+	test("migrations applied by the failed run itself: stop and get help", () => {
+		const run = runDeploy({
+			state: {
+				applyExit: 1,
+				afterApplyFail: { applied: ["001_initial"], pending: ["002_media_status", "091_redirect_artifacts"] },
+			},
+		});
+		assert.match(run.output, /Get help/);
+		assert.doesNotMatch(run.output, /[Rr]etry the build/);
+	});
+
+	test("ambiguous write with nothing applied: stop and get help", () => {
+		const run = runDeploy({
+			state: { applyExit: 1, applyMessage: "The D1 write outcome is ambiguous because its response was not received safely." },
+		});
+		assert.match(run.output, /Get help/);
+		assert.doesNotMatch(run.output, /[Rr]etry the build/);
+	});
+
+	test("ambiguous write with 079 next: the documented exception, run again", () => {
+		const run = runDeploy({
+			state: {
+				...applied,
+				pending: ["079_datetime_normalization", "080_x"],
+				applyExit: 1,
+				applyMessage: "The D1 write outcome is ambiguous because its response was not received safely.",
+			},
+		});
+		assert.notEqual(run.code, 0);
+		assert.match(run.output, /079_datetime_normalization/);
+		assert.match(run.output, /Retry/);
+		assert.doesNotMatch(run.output, /Get help/);
+	});
+
+	test("079 needing manual review: correct the values, then run again", () => {
+		const run = runDeploy({
+			state: {
+				...applied,
+				pending: ["079_datetime_normalization"],
+				applyExit: 1,
+				applyMessage: "Datetime migration requires manual review: ec_posts/1 published_at",
+			},
+		});
+		assert.match(run.output, /explicit UTC offset/);
+		assert.doesNotMatch(run.output, /Get help/);
+	});
+
+	test("a failed status read afterwards: stop and get help", () => {
+		const run = runDeploy({ state: { applyExit: 1, afterApplyFail: { statusExit: 1 } } });
+		assert.match(run.output, /could not be read/i);
+		assert.match(run.output, /Get help/);
+	});
+
+	test("the state is printed with the lock", () => {
+		const run = runDeploy({ state: { ...applied, applyExit: 1, afterApplyFail: { lock: ago(0) } } });
+		assert.match(run.output, /lock: held/);
+	});
+
+	test("permission failure on apply names D1 Edit", () => {
+		const run = runDeploy({ state: { applyExit: 1, applyMessage: "D1 API request failed with HTTP status 403." } });
+		assert.match(run.output, /D1 Edit/);
+	});
+});
+
+describe("maintenance-window migrations", () => {
+	test("refused on an existing store, pointing to UPGRADING", () => {
+		const run = runDeploy({
+			state: { applied: ["001_initial"], pending: ["095_plugin_storage_unique_scope"] },
+		});
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status"]);
+		assert.match(run.output, /095_plugin_storage_unique_scope/);
+		assert.match(run.output, /UPGRADING/);
+	});
+
+	test("applied normally on a fresh database", () => {
+		const run = runDeploy({ state: { pending: ["001_initial", "095_plugin_storage_unique_scope"] } });
+		assert.equal(run.code, 0, run.output);
+		assert.ok(run.steps.includes("apply"));
+	});
+});
+
+describe("restore point", () => {
+	const existing = { applied: ["001_initial"], pending: ["002_media_status"] };
+
+	test("existing store: bookmark and commit logged before applying", () => {
+		const run = runDeploy({ state: existing });
+		assert.equal(run.code, 0, run.output);
+		assert.ok(run.fetches.some((path) => path.endsWith(`/d1/database/${REAL_DB_ID}/time_travel/bookmark`)));
+		assert.match(run.output, /bookmark-before-migrating/);
+		assert.match(run.output, new RegExp(COMMIT));
+		assert.ok(run.output.indexOf("bookmark-before-migrating") < run.output.indexOf("Applied"));
+	});
+
+	test("fresh database: no restore point", () => {
+		const run = runDeploy();
+		assert.equal(run.fetches.length, 0);
+		assert.doesNotMatch(run.output, /[Bb]ookmark/);
+	});
+
+	test("nothing pending: no restore point", () => {
+		const run = runDeploy({ state: { applied: ["001_initial"], pending: [] } });
+		assert.equal(run.fetches.length, 0);
+	});
+
+	test("unreadable bookmark: logs the UTC time, says why it is safe, and continues", () => {
+		const run = runDeploy({ state: { ...existing, bookmarkFail: true } });
+		assert.equal(run.code, 0, run.output);
+		assert.match(run.output, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+		assert.match(run.output, /--timestamp/);
+		assert.match(run.output, /Time Travel/);
+	});
 });
 
 describe("failures stop before deploy", () => {
-	test("migrate failure stops before deploy with a plain message", () => {
+	test("migrate failure stops before deploy", () => {
 		const run = runDeploy({ state: { applyExit: 1 } });
 		assert.notEqual(run.code, 0);
-		assert.deepEqual(run.steps, ["status", "apply"]);
-		assert.match(run.output, /Retry/);
-		assert.match(run.output, /not deployed|Nothing was deployed/i);
+		assert.ok(!run.steps.includes("deploy"));
 	});
 
-	test("final check failure stops before deploy", () => {
+	test("final check failure after applying says migrations may be applied", () => {
 		const run = runDeploy({ state: { checkExit: 2 } });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status", "apply", "check"]);
+		assert.match(run.output, /may already be applied/);
+		assert.match(run.output, /does not undo/);
+		assert.doesNotMatch(run.output, /changed nothing/);
+	});
+
+	test("final check failure with nothing applied says nothing changed", () => {
+		const run = runDeploy({ state: { pending: [], applied: PENDING, checkExit: 2 } });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["status", "check"]);
+		assert.match(run.output, /changed nothing/);
+	});
+
+	test("deploy failure after applying says migrations stay applied, keeps the code", () => {
+		const run = runDeploy({ state: { deployExit: 5 } });
+		assert.equal(run.code, 5, run.output);
+		assert.match(run.output, /already applied/);
+		assert.match(run.output, /does not undo/);
+	});
+
+	test("deploy failure with nothing applied adds no migration warning", () => {
+		const run = runDeploy({ state: { pending: [], applied: PENDING, deployExit: 5 } });
+		assert.equal(run.code, 5, run.output);
+		assert.doesNotMatch(run.output, /does not undo/);
 	});
 
 	test("status failure stops before anything else", () => {
 		const run = runDeploy({ state: { statusExit: 1 } });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status"]);
+		assert.match(run.output, /changed nothing/);
 	});
 
-	test("unknown applied migrations are refused", () => {
+	test("unknown applied migrations: refused, mentions the dashboard rollback", () => {
 		const run = runDeploy({ state: { unknownApplied: ["999_future"], pending: [] } });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status"]);
 		assert.match(run.output, /newer/i);
+		assert.match(run.output, /Deployments/);
 	});
 
 	test("a malformed fingerprint from status is refused", () => {
 		const run = runDeploy({ state: { fingerprint: "nope" } });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["status"]);
+	});
+
+	test("a permission failure reading status names D1 Edit and the steps", () => {
+		const run = runDeploy({ state: { statusExit: 1, statusMessage: "Cloudflare D1 metadata request failed with HTTP status 403." } });
+		assert.notEqual(run.code, 0);
+		assert.match(run.output, /D1 Edit/);
+		assert.match(run.output, /API [Tt]oken/);
 	});
 });
 
@@ -339,6 +631,24 @@ describe("preflight refusals", () => {
 		const run = runDeploy({ databaseId: "your-database-id" });
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, []);
+	});
+
+	test("the real wrangler.jsonc parses: its placeholder is found", () => {
+		const wranglerFile = readFileSync(join(here, "..", "wrangler.jsonc"), "utf8");
+		const run = runDeploy({ wranglerFile });
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, []);
+		assert.match(run.output, /placeholder/i);
+	});
+
+	test("the real wrangler.jsonc with a real id passes that id with --d1", () => {
+		const wranglerFile = readFileSync(join(here, "..", "wrangler.jsonc"), "utf8").replace(
+			PLACEHOLDER_DB_ID,
+			REAL_DB_ID,
+		);
+		const run = runDeploy({ wranglerFile });
+		assert.equal(run.code, 0, run.output);
+		assert.equal(flagValue(run.calls[0], "--d1"), REAL_DB_ID);
 	});
 
 	test("missing token: names the variable, where to set it, and stops", () => {
@@ -371,6 +681,20 @@ describe("account id", () => {
 		assert.ok(!run.steps.includes("whoami"));
 	});
 
+	test("wrangler.jsonc account_id beats CLOUDFLARE_ACCOUNT_ID", () => {
+		const configured = "fedcba9876543210fedcba9876543210";
+		const run = runDeploy({ wranglerExtra: `"account_id": "${configured}",` });
+		assert.equal(run.code, 0, run.output);
+		assert.equal(flagValue(run.calls[0], "--account-id"), configured);
+	});
+
+	test("logs whether the variable was present, without its value", () => {
+		const present = runDeploy();
+		assert.match(present.output, /CLOUDFLARE_ACCOUNT_ID: present/);
+		const absent = runDeploy({ omit: ["CLOUDFLARE_ACCOUNT_ID"] });
+		assert.match(absent.output, /CLOUDFLARE_ACCOUNT_ID: not present/);
+	});
+
 	test("account_id in wrangler.jsonc is used without calling whoami", () => {
 		const configured = "fedcba9876543210fedcba9876543210";
 		const run = runDeploy({
@@ -389,19 +713,40 @@ describe("account id", () => {
 		assert.equal(flagValue(run.calls[1], "--account-id"), ACCOUNT);
 	});
 
-	test("several accounts: refused, because guessing could hit the wrong store", () => {
+	const SECOND = "fedcba9876543210fedcba9876543210";
+	const twoAccounts = [
+		{ id: ACCOUNT, name: "a" },
+		{ id: SECOND, name: "b" },
+	];
+
+	test("several accounts: picks the one where the database answers", () => {
 		const run = runDeploy({
 			omit: ["CLOUDFLARE_ACCOUNT_ID"],
-			state: {
-				accounts: [
-					{ id: ACCOUNT, name: "a" },
-					{ id: "fedcba9876543210fedcba9876543210", name: "b" },
-				],
-			},
+			state: { accounts: twoAccounts, d1Access: [SECOND] },
+		});
+		assert.equal(run.code, 0, run.output);
+		assert.equal(flagValue(run.calls[1], "--account-id"), SECOND);
+		assert.equal(run.fetches.length, 2);
+	});
+
+	test("several accounts, database in none: refused with exact steps", () => {
+		const run = runDeploy({
+			omit: ["CLOUDFLARE_ACCOUNT_ID"],
+			state: { accounts: twoAccounts, d1Access: [] },
 		});
 		assert.notEqual(run.code, 0);
 		assert.deepEqual(run.steps, ["whoami"]);
 		assert.match(run.output, /CLOUDFLARE_ACCOUNT_ID/);
+		assert.match(run.output, /Settings/);
+	});
+
+	test("several accounts, database in more than one: refused", () => {
+		const run = runDeploy({
+			omit: ["CLOUDFLARE_ACCOUNT_ID"],
+			state: { accounts: twoAccounts, d1Access: [ACCOUNT, SECOND] },
+		});
+		assert.notEqual(run.code, 0);
+		assert.deepEqual(run.steps, ["whoami"]);
 	});
 
 	test("whoami failure names the variable to set", () => {
@@ -434,6 +779,20 @@ describe("secrets", () => {
 	test("secrets echoed on a failed apply never reach the build log", () => {
 		const run = runDeploy({ state: { leak: true, applyExit: 1 } });
 		assert.notEqual(run.code, 0);
+		assertClean(run);
+	});
+
+	test("secrets on stdout of a failed apply never reach the build log", () => {
+		const run = runDeploy({ state: { leakStdout: true, applyExit: 1 } });
+		assert.notEqual(run.code, 0);
+		assert.match(run.output, /leak on stdout/);
+		assertClean(run);
+	});
+
+	test("a secret on a final line without a newline is scrubbed", () => {
+		const run = runDeploy({ state: { leakFinalLine: true, applyExit: 1 } });
+		assert.notEqual(run.code, 0);
+		assert.match(run.output, /final line no newline/);
 		assertClean(run);
 	});
 
