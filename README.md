@@ -13,7 +13,8 @@ update is a version bump, not a merge.
 ## Before you click
 
 - **Use Workers Paid until this is confirmed.** A new store's first start runs about 585
-  database migration statements, plus 54 for the sample data. Cloudflare documents a limit of
+  database migration statements, plus up to 54 for the store's default
+  collections and settings. Cloudflare documents a limit of
   50 D1 queries per Worker invocation on Workers Free (1,000 on Paid). A new store has not been
   shown to finish its first start on Workers Free, and a start that is cut off part-way may
   leave a database that cannot be repaired (see "If the first visit fails"). Subscribe to
@@ -25,9 +26,11 @@ update is a version bump, not a merge.
   `printf 'emdash_enc_v1_%s\n' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"`.
   **Keep a copy in your password manager.** It encrypts the payment keys you enter in the
   admin; if it is lost, they have to be entered again. If you leave it blank the store starts,
-  but saving a payment key fails with `PLUGIN_SETTING_ENCRYPTION_KEY_MISSING`.
-- **A second store in the same Cloudflare account:** on the deploy page give every resource
-  (Worker, database, buckets, KV namespace) its own name, and change both rate-limit ids.
+  but the admin refuses payment keys and says: "EMDASH_ENCRYPTION_KEY is not set, so keys
+  entered under Payments & email are refused."
+- **A second store in the same Cloudflare account:** give each resource the deploy page
+  offers its own name. Then change both rate-limit ids in `wrangler.jsonc` in your new
+  repository.
   Each store uses one cron trigger, and Workers Free allows 5 per account.
 
 ## What the button creates
@@ -53,7 +56,7 @@ and `npm run deploy`.
 **Do this first.** Workers Builds also builds other branches, such as the weekly update
 branch. Depending on how your Worker is set up, that build creates a Cloudflare Preview or
 uploads a version with a Version URL. A Preview does not inherit your production bindings
-unless they are declared for it, and this template declares none. A Version URL runs the
+unless they are declared for it, and this template declares no database or buckets for it. A Version URL runs the
 uploaded version on your **production resources, including the live database**, so opening it
 could run that version's database changes against your live data. We have not confirmed which
 of the two your Worker gets, so turn the builds off. `wrangler.jsonc` already sets
@@ -103,7 +106,7 @@ a sender domain on Cloudflare. In this order:
 1. Onboard the domain for Email Sending and send a test email.
 2. Uncomment `"send_email": [{ "name": "EMAIL" }]` in `wrangler.jsonc`.
 3. Set the sender: `emailFrom: "store@mail.example.com"` in `astro.config.mjs`, or a build
-   variable `OTTA_EMAIL_FROM` (Worker → Settings → Builds → Variables). Push.
+   variable `OTTA_EMAIL_FROM` (Worker → Settings → Build → Variables). Push.
 
 The build refuses a sender without the binding.
 
@@ -131,12 +134,15 @@ Two kinds of Otta release need more than merging:
 
 ## If the first visit fails
 
-The first request sets up the database. If the site answers with an error:
+The first request sets up the database. If that fails, the page usually says only "Database
+migrations are required. Apply the deployment migration manifest and retry." or "This site's
+database has not been migrated yet". The specific reason is in your Worker's **Logs**; look
+there for one of these:
 
 - "Database initialization is backing off after a recent migration failure": the store tries
   again after about 30 seconds and skips migrations it has already recorded. That helps
-  after a brief fault. It does not repair a migration that stopped part-way, which fails
-  again each time.
+  after a brief fault. It does not repair a migration that stopped part-way, which can
+  fail again each time.
 - "The migration lock has been held since …": a start was cut off, for example by a platform
   limit. The message says a migration may still be running and links to EmDash's steps for
   releasing the lock. Those steps warn that the interrupted migration may be partly applied,
