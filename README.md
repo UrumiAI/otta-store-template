@@ -12,13 +12,23 @@ update is a version bump, not a merge.
 
 ## Before you click
 
+- **Use Workers Paid until this is confirmed.** A new store's first start runs about 585
+  database migration statements, plus 54 for the sample data. Cloudflare documents a limit of
+  50 D1 queries per Worker invocation on Workers Free (1,000 on Paid). A new store has not been
+  shown to finish its first start on Workers Free, and a start that is cut off part-way may
+  leave a database that cannot be repaired (see "If the first visit fails"). Subscribe to
+  Workers Paid before you deploy.
 - **R2 needs a payment method on your Cloudflare account.** The free allowance still applies;
   the store's two buckets are created during deploy.
 - **Have an encryption key ready.** The button asks for `EMDASH_ENCRYPTION_KEY`. Make one with
-  `npx emdash secrets generate`, or with
-  `node -e "console.log('emdash_enc_v1_'+require('crypto').randomBytes(32).toString('base64url'))"`.
+  `npx emdash secrets generate`, or, without Node:
+  `printf 'emdash_enc_v1_%s\n' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"`.
   **Keep a copy in your password manager.** It encrypts the payment keys you enter in the
-  admin; without it they have to be entered again.
+  admin; if it is lost, they have to be entered again. If you leave it blank the store starts,
+  but saving a payment key fails with `PLUGIN_SETTING_ENCRYPTION_KEY_MISSING`.
+- **A second store in the same Cloudflare account:** on the deploy page give every resource
+  (Worker, database, buckets, KV namespace) its own name, and change both rate-limit ids.
+  Each store uses one cron trigger, and Workers Free allows 5 per account.
 
 ## What the button creates
 
@@ -31,7 +41,7 @@ A copy of this repository in your GitHub account, and on Cloudflare:
 | `DOWNLOADS` | R2 bucket | Files buyers pay for. **Keep it private**: never turn on its r2.dev URL or connect a domain to it. It must be a different bucket from `MEDIA` (the build refuses one shared bucket). |
 | `SESSION` | KV namespace | Admin sign-in sessions. |
 | `IMAGES` | Images | Resizes product photos. |
-| `RATE_LIMIT_AUTH`, `RATE_LIMIT_WRITES` | Rate limits | Per-visitor limits on sign-in and on cart and checkout writes. Cash on delivery is only offered with them. Their `namespace_id`s (`1001`, `1002`) are fixed in `wrangler.jsonc`, and Workers in one Cloudflare account that use the same ids **share the counters**: give a second store in the same account its own ids. |
+| `RATE_LIMIT_AUTH`, `RATE_LIMIT_WRITES` | Rate limits | Per-visitor limits on sign-in and on cart and checkout writes. Cash on delivery is only offered with `RATE_LIMIT_WRITES`. Their `namespace_id`s (`1001`, `1002`) are set in `wrangler.jsonc`, and Workers in one Cloudflare account that use the same ids **share the counters**: give a second store in the same account its own ids. |
 
 It also sets up **Workers Builds**: every push to your production branch runs `npm run build`
 and `npm run deploy`.
@@ -40,25 +50,30 @@ and `npm run deploy`.
 
 ### 1. Turn off non-production branch builds
 
-**Do this first.** Workers Builds also builds other branches (such as the weekly update
-branch) and uploads each as a preview version. A preview version uses your **live
-database**, and opening its URL runs that version's database changes against your live data
-before you have decided to update. `wrangler.jsonc` already turns preview URLs off
-(`"preview_urls": false`); turning off the builds as well means no such version is uploaded at
-all. In the Cloudflare dashboard: your Worker → **Settings** → **Builds** → **Branch control**
-→ turn off builds for non-production branches.
+**Do this first.** Workers Builds also builds other branches, such as the weekly update
+branch. Depending on how your Worker is set up, that build creates a Cloudflare Preview or
+uploads a version with a Version URL. A Preview does not inherit your production bindings
+unless they are declared for it, and this template declares none. A Version URL runs the
+uploaded version on your **production resources, including the live database**, so opening it
+could run that version's database changes against your live data. We have not confirmed which
+of the two your Worker gets, so turn the builds off. `wrangler.jsonc` already sets
+`"preview_urls": false`, which disables Version URLs. In the Cloudflare dashboard: your Worker
+→ **Settings** → **Build** → **Branch control** → clear **Enable Preview Builds**.
 
 ### 2. Claim your store
 
-Until you claim it, the admin is locked for everyone. Use either route:
+Until you claim it, the admin is locked for everyone. Claim it promptly: until then, anyone who
+can read your Worker's logs can use the setup link, and the link does not expire. Use either
+route:
 
 - **From the logs.** In the dashboard, open your Worker → **Logs**. Visit
   `https://<your-worker>.<your-subdomain>.workers.dev/_emdash/admin` once, then search the
   logs for `[otta-setup]`. That line holds your setup link. Open it.
-- **With your own token** (nothing is logged). Before anyone visits the site, add a secret
-  named `OTTA_SETUP_TOKEN` (Worker → **Settings** → **Variables and Secrets**) of at least 32
-  random characters (`A-Z a-z 0-9 - _`; `openssl rand -hex 32` makes one). Then open
-  `https://<your-site>/_emdash/admin/setup?setup_token=<your token>`.
+- **With your own token.** Add a secret named `OTTA_SETUP_TOKEN` (Worker → **Settings** → **Variables and Secrets**) of at least 32
+  random characters (`A-Z a-z 0-9 - _`; `openssl rand -hex 32` makes one). It replaces the
+  generated token, so a link already in the logs stops working. Then open
+  `https://<your-site>/_emdash/admin/setup?setup_token=<your token>`. If you add it before the
+  first visit, no link is written to the logs.
 
 The link opens the setup wizard. Choose **Sample content** for three demo products, then
 create your account and its passkey. After that, the link stops working and you sign in with
@@ -68,8 +83,12 @@ the passkey.
 
 In the admin, open **Store settings**:
 
-- **Cards (Stripe):** enter your Stripe publishable key, secret key and webhook signing secret
-  under Payments.
+- **Cards (Stripe):** first, in the Stripe Dashboard, add a webhook endpoint for
+  `https://<your-site>/webhooks/stripe` and subscribe it to exactly two events:
+  `payment_intent.succeeded` and `payment_intent.payment_failed`. Then enter your Stripe
+  publishable key, secret key and the endpoint's signing secret (`whsec_…`) under Payments.
+  Card checkout needs both the secret key and the signing secret. The admin does not show the
+  URL or the events, so keep this note.
 - **Cash on delivery:** turn on "Offer cash on delivery at checkout". It is offered for
   physical products, with the buyer's address and phone.
 
@@ -114,11 +133,19 @@ Two kinds of Otta release need more than merging:
 
 The first request sets up the database. If the site answers with an error:
 
-- "backing off after a recent migration failure": wait a minute and reload. It retries on
-  its own.
-- "The migration lock has been held since …": the first setup was cut off, for example by
-  the Workers Free CPU limit. Release the lock as the message's link explains (one statement
-  in the D1 console of the dashboard), then reload.
+- "Database initialization is backing off after a recent migration failure": the store tries
+  again after about 30 seconds and skips migrations it has already recorded. That helps
+  after a brief fault. It does not repair a migration that stopped part-way, which fails
+  again each time.
+- "The migration lock has been held since …": a start was cut off, for example by a platform
+  limit. The message says a migration may still be running and links to EmDash's steps for
+  releasing the lock. Those steps warn that the interrupted migration may be partly applied,
+  and releasing the lock does not undo that.
+- **If it keeps failing:** when the store has no data yet, delete its D1 database and create
+  a new one, put the new `database_id` in `wrangler.jsonc` in your repository, push so it
+  redeploys, and claim the store again. Do this on Workers Paid; on Workers Free the same
+  start can be cut off again. Once the store holds orders, do not delete anything: get
+  help first. We have not tested this recovery on a Cloudflare account.
 
 ## Adding your own code
 

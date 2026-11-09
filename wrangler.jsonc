@@ -3,8 +3,9 @@
 // file. `npm run build` reads it; `npm run deploy` (plain `wrangler deploy`)
 // then deploys what the build produced — never add `--config` there.
 //
-// Secrets never go in this file. The store's one secret, EMDASH_ENCRYPTION_KEY,
-// is a Worker secret (see .dev.vars.example).
+// Secrets never go in this file. The store's one required secret,
+// EMDASH_ENCRYPTION_KEY, is a Worker secret (see .dev.vars.example). Two more
+// are optional: OTTA_SETUP_TOKEN and OTTA_WH_TOKEN.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "otta-store",
@@ -13,10 +14,11 @@
 	// Do NOT add `global_fetch_strictly_public`: the store uses D1 sessions, and
 	// that flag stalls them (Otta DEPLOYMENT.md §2.4).
 	"compatibility_flags": ["nodejs_compat"],
-	// No preview URLs (<version>-<name>.<subdomain>.workers.dev). A preview
-	// version uses this store's LIVE database, and its first request would run that
-	// version's database changes against your live data. README.md, step 1, also
-	// turns off non-production branch builds, which upload such versions.
+	// No Version URLs (<version>-<name>.<subdomain>.workers.dev; Cloudflare keeps
+	// the old name "preview_urls" for this setting). A Version URL runs on the
+	// production resources, including this store's LIVE database, so its first
+	// request could run that version's database changes against your live data.
+	// README.md, step 1, also turns off non-production branch builds.
 	"preview_urls": false,
 	"d1_databases": [
 		{
@@ -57,7 +59,8 @@
 	// Per-IP limits on anonymous writes (cart, checkout) and sign-in requests.
 	// Cash on delivery is only offered with RATE_LIMIT_WRITES. Each namespace_id
 	// is a number of your choosing, unique in your Cloudflare account; two
-	// Workers that share one share its counters. `period` must stay 60.
+	// Workers that share one share its counters. A second store in the same
+	// account also needs its own Worker, database, bucket and KV names. `period` must stay 60.
 	"ratelimits": [
 		{ "name": "RATE_LIMIT_AUTH", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
 		{ "name": "RATE_LIMIT_WRITES", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
