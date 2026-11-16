@@ -14,18 +14,17 @@ update is a version bump, not a merge.
 
 - **Workers Free: deploy with the button.** A new store's database needs 90 migrations (about
   590 statements). The deploy applies them from the build, before the Worker goes live, using
-  the Cloudflare API token Workers Builds gives the build. In one real build that token could
+  the Cloudflare API token Workers Builds gives the build. In the real builds so far that token could
   change D1 without any setup; if yours cannot, the build stops and says how to fix it (see
   "If the deploy or the first visit fails").
-  What has been shown, and what has not: on a real Workers Free account a first start inside
-  the Worker was cut off after 34 of 90 migrations and left that store stuck; the remaining 56
-  were then applied by hand with `emdash migrate` and the store started. Separately, this
-  template's script applied all 90 to a scratch D1 database from a local build, on a free
-  account. The complete button flow with this script has not yet been run end to end on Workers
-  Free. Do not deploy a new store with plain `wrangler deploy`: the Worker would set up the
-  database itself and be cut off. The store's default collections and settings (up to 54
-  more statements) are still set up on the first request; that step finished on Workers Free in
-  the manual recovery above.
+  What has been shown: before this script existed, a first start inside the Worker on a real
+  Workers Free account was cut off after 34 of 90 migrations and left that store stuck. With
+  this script, the complete button flow was run end to end on Workers Free on 2026-11-10
+  (template `ea9d06a`, `@urumi.ai/otta-store` 0.2.0): deploy, storefront, and claim through the
+  `[otta-setup]` link from the logs and a passkey. Do not deploy a new store
+  with plain `wrangler deploy`: the Worker would set up the database itself and be cut off. The
+  store's default collections and settings (up to 54 more statements) are still set up on the
+  first request; in that run it finished on Workers Free.
 - **R2 needs a payment method on your Cloudflare account.** The free allowance still applies;
   the store's two buckets are created during deploy.
 - **Have an encryption key ready.** The button asks for `EMDASH_ENCRYPTION_KEY`. Make one with
@@ -104,7 +103,10 @@ In the admin, open **Store settings**:
   physical products, with the buyer's address and phone.
 
 The demo products have no price until you give them one: open each product and fill in its
-**Pricing & stock** cards.
+**Pricing & stock** cards. If a demo product's card says "Product not found", the product has no
+commerce record yet: edit the product (its description, for instance; you can change it back)
+and click **Publish changes**, which creates it at once. (A background task also creates it, but
+with the default "Background work per minute" setting that can take up to a day.)
 
 ### 4. Email (optional, Workers Paid)
 
@@ -247,9 +249,10 @@ Deploying from your own machine runs the same script, and needs an API token wit
 `CLOUDFLARE_API_TOKEN` (`npm run build`, then `CLOUDFLARE_API_TOKEN=<token> npm run deploy`).
 Add `-- --migrate-only` to apply migrations without deploying. The script takes the account id
 from `account_id` in `wrangler.jsonc`, then `CLOUDFLARE_ACCOUNT_ID`, then the only account the
-token can see, or, if it can see several, the one that holds this database. Workers Builds has
-not been confirmed to provide the account id on a real build yet; the first lines of the build
-log say whether `CLOUDFLARE_ACCOUNT_ID` was present.
+token can see, or, if it can see several, the one that holds this database. The real build of
+2026-11-10 found the account id, but which of these supplied it was not recorded, so whether
+Workers Builds provides `CLOUDFLARE_ACCOUNT_ID` is still unconfirmed; the first lines of the
+build log say whether it was present.
 
 ## Files
 
